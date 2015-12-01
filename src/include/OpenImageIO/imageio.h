@@ -1462,6 +1462,12 @@ OIIO_API bool copy_image (int nchannels, int width, int height, int depth,
 /// start with a TIFF directory header.
 OIIO_API bool decode_exif (const void *exif, int length, ImageSpec &spec);
 
+/// Decode a raw MP data block and save all the metadata in an
+/// ImageSpec.  Return true if all is ok, false if the mp block was
+/// somehow malformed.  The binary data pointed to by 'mp' should
+/// start with a TIFF directory header.
+OIIO_API bool decode_mp (const void *mp, int length, ImageSpec &spec);
+
 /// Construct an Exif data block from the ImageSpec, appending the Exif 
 /// data as a big blob to the char vector.
 OIIO_API void encode_exif (const ImageSpec &spec, std::vector<char> &blob);

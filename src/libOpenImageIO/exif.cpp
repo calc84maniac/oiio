@@ -38,6 +38,7 @@
 #include <algorithm>
 
 #include <boost/foreach.hpp>
+#include <boost/lexical_cast.hpp>
 
 #include "OpenImageIO/fmath.h"
 
@@ -270,6 +271,58 @@ static const EXIF_tag_info gps_tag_table[] = {
 
 
 
+struct MP_entry {
+    unsigned int image_attr;
+    unsigned int image_size;
+    unsigned int image_offset;
+    unsigned short dependent_entry[2];
+};
+
+enum MPTag {
+    MPTAG_MPFVERSION = 0xB000,
+    MPTAG_NUMBEROFIMAGES = 0xB001,
+    MPTAG_MPENTRY = 0xB002,
+    MPTAG_IMAGEUIDLIST = 0xB003,
+    MPTAG_TOTALFRAMES = 0xB004,
+    MPTAG_MPINDIVIDUALNUM = 0xB101,
+    MPTAG_PANORIENTATION = 0xB201,
+    MPTAG_PANOVERLAP_H = 0xB202,
+    MPTAG_PANOVERLAP_V = 0xB203,
+    MPTAG_BASEVIEWPOINTNUM = 0xB204,
+    MPTAG_CONVERGENCEANGLE = 0xB205,
+    MPTAG_BASELINELENGTH = 0xB206,
+    MPTAG_VERTICALDIVERGENCE = 0xB207,
+    MPTAG_AXISDISTANCE_X = 0xB208,
+    MPTAG_AXISDISTANCE_Y = 0xB209,
+    MPTAG_AXISDISTANCE_Z = 0xB20A,
+    MPTAG_YAWANGLE = 0xB20B,
+    MPTAG_PITCHANGLE = 0xB20C,
+    MPTAG_ROLLANGLE = 0xB20D
+};
+
+static const EXIF_tag_info mp_tag_table[] = {
+    { MPTAG_MPFVERSION, "MP:MPFVersion",    TIFF_UNDEFINED, 4 },
+    { MPTAG_NUMBEROFIMAGES, "MP:NumberOfImages",    TIFF_LONG, 1 },
+    { MPTAG_MPENTRY,    "MP:MPEntry",   TIFF_UNDEFINED, -16 },
+    { MPTAG_IMAGEUIDLIST,   "MP:UIDList",   TIFF_UNDEFINED, -33 },
+    { MPTAG_TOTALFRAMES,    "MP:TotalFrames",   TIFF_LONG, 1 },
+    { MPTAG_MPINDIVIDUALNUM,    "MP:MPIndividualNum",   TIFF_LONG, 1 },
+    { MPTAG_PANORIENTATION, "MP:PanOrientation",    TIFF_LONG, 1 },
+    { MPTAG_PANOVERLAP_H, "MP:PanOverlap_H",    TIFF_RATIONAL, 1 },
+    { MPTAG_PANOVERLAP_V, "MP:PanOverlap_V",    TIFF_RATIONAL, 1 },
+    { MPTAG_BASEVIEWPOINTNUM, "MP:BaseViewpointNum",    TIFF_LONG, 1 },
+    { MPTAG_CONVERGENCEANGLE, "MP:ConvergenceAngle",    TIFF_SRATIONAL, 1 },
+    { MPTAG_BASELINELENGTH, "MP:BaselineLength",    TIFF_RATIONAL, 1 },
+    { MPTAG_VERTICALDIVERGENCE, "MP:VerticalDivergence",    TIFF_SRATIONAL, 1 },
+    { MPTAG_AXISDISTANCE_X, "MP:AxisDistance_X",    TIFF_SRATIONAL, 1 },
+    { MPTAG_AXISDISTANCE_Y, "MP:AxisDistance_Y",    TIFF_SRATIONAL, 1 },
+    { MPTAG_AXISDISTANCE_Z, "MP:AxisDistance_Z",    TIFF_SRATIONAL, 1 },
+    { MPTAG_YAWANGLE, "MP:YawAngle",    TIFF_SRATIONAL, 1 },
+    { MPTAG_PITCHANGLE, "MP:PitchAngle",    TIFF_SRATIONAL, 1 },
+    { MPTAG_ROLLANGLE, "MP:RollAngle",  TIFF_SRATIONAL, 1 },
+    { -1, NULL }  // signal end of table
+};
+
 
 
 class TagMap {
@@ -322,7 +375,7 @@ private:
 
 static TagMap exif_tagmap (exif_tag_table);
 static TagMap gps_tagmap (gps_tag_table);
-
+static TagMap mp_tagmap (mp_tag_table);
 
 
 
@@ -574,6 +627,24 @@ read_exif_tag (ImageSpec &spec, const TIFFDirEntry *dirp,
 #if DEBUG_EXIF_READ
         std::cerr << "> End Interoperability\n\n";
 #endif
+    } else if (dir.tdir_tag == MPTAG_MPENTRY) {
+        // Special case: Attributes for subimages.
+        // For now, just save the data offset and image size for each as an attribute.
+        const struct MP_entry *data = (const struct MP_entry *)(buf + dir.tdir_offset);
+        unsigned int subimage = 0;
+        while (subimage * sizeof(MP_entry) < dir.tdir_count) {
+            struct MP_entry entry = data[subimage];
+            if (swab) {
+                swap_endian (&entry.image_attr);
+                swap_endian (&entry.image_size);
+                swap_endian (&entry.image_offset);
+                swap_endian (&entry.dependent_entry[0], 2);
+            }
+            std::string id = boost::lexical_cast<std::string>(subimage);
+            spec.attribute ("MP:SubimageSize_"+id, (unsigned int)entry.image_size);
+            spec.attribute ("MP:SubimageOffset_"+id, (unsigned int)entry.image_offset);
+            subimage++;
+        }
     } else {
         // Everything else -- use our table to handle the general case
         const char *name = tagmap.name (dir.tdir_tag);
@@ -829,6 +900,61 @@ decode_exif (const void *exif, int length, ImageSpec &spec)
         if (cs != 0xffff)
             spec.attribute ("oiio:ColorSpace", "sRGB");
     }
+    return true;
+}
+
+
+
+// Decode a raw MP data block and save all the metadata in an
+// ImageSpec.  Return true if all is ok, false if the exif block was
+// somehow malformed.
+bool
+decode_mp (const void *mp, int length, ImageSpec &spec)
+{
+    const unsigned char *buf = (const unsigned char *) mp;
+
+#if DEBUG_EXIF_READ
+    std::cerr << "Exif dump:\n";
+    for (int i = 0;  i < length;  ++i) {
+        if (buf[i] >= ' ')
+            std::cerr << (char)buf[i] << ' ';
+        std::cerr << "(" << (int)(unsigned char)buf[i] << ") ";
+    }
+    std::cerr << "\n";
+#endif
+
+    // The first item should be a standard TIFF header.  Note that HERE,
+    // not the start of the Exif blob, is where all TIFF offsets are
+    // relative to.  The header should have the right magic number (which
+    // also tells us the endianness of the data) and an offset to the
+    // first TIFF directory.
+    //
+    // N.B. Just read libtiff's "tiff.h" for info on the structure 
+    // layout of TIFF headers and directory entries.  The TIFF spec
+    // itself is also helpful in this area.
+    TIFFHeader head = *(const TIFFHeader *)buf;
+    if (head.tiff_magic != 0x4949 && head.tiff_magic != 0x4d4d)
+        return false;
+    bool host_little = littleendian();
+    bool file_little = (head.tiff_magic == 0x4949);
+    bool swab = (host_little != file_little);
+    if (swab)
+        swap_endian (&head.tiff_diroff);
+
+    // keep track of IFD offsets we've already seen to avoid infinite
+    // recursion if there are circular references.
+    std::set<size_t> ifd_offsets_seen;
+
+    // Read the directory that the header pointed to.  It should contain
+    // some number of directory entries containing tags to process.
+    const unsigned char *ifd = (buf + head.tiff_diroff);
+    unsigned short ndirs = *(const unsigned short *)ifd;
+    if (swab)
+        swap_endian (&ndirs);
+    for (int d = 0;  d < ndirs;  ++d)
+        read_exif_tag (spec, (const TIFFDirEntry *) (ifd+2+d*sizeof(TIFFDirEntry)),
+                       (const char *)buf, swab, ifd_offsets_seen, mp_tagmap);
+
     return true;
 }
 
