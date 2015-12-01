@@ -940,20 +940,28 @@ decode_mp (const void *mp, int length, ImageSpec &spec)
     bool swab = (host_little != file_little);
     if (swab)
         swap_endian (&head.tiff_diroff);
+    uint32_t diroff = head.tiff_diroff;
 
     // keep track of IFD offsets we've already seen to avoid infinite
     // recursion if there are circular references.
     std::set<size_t> ifd_offsets_seen;
+    ifd_offsets_seen.insert(0);
 
-    // Read the directory that the header pointed to.  It should contain
-    // some number of directory entries containing tags to process.
-    const unsigned char *ifd = (buf + head.tiff_diroff);
-    unsigned short ndirs = *(const unsigned short *)ifd;
-    if (swab)
-        swap_endian (&ndirs);
-    for (int d = 0;  d < ndirs;  ++d)
-        read_exif_tag (spec, (const TIFFDirEntry *) (ifd+2+d*sizeof(TIFFDirEntry)),
-                       (const char *)buf, swab, ifd_offsets_seen, mp_tagmap);
+    // Loop until we reach a directory offset seen before
+    while (ifd_offsets_seen.find (diroff) == ifd_offsets_seen.end ()) {
+        // Read the directory that the header pointed to.  It should contain
+        // some number of directory entries containing tags to process.
+        const unsigned char *ifd = (buf + diroff);
+        unsigned short ndirs = *(const unsigned short *)ifd;
+        if (swab)
+            swap_endian (&ndirs);
+        for (int d = 0;  d < ndirs;  ++d)
+            read_exif_tag (spec, (const TIFFDirEntry *) (ifd+2+d*sizeof(TIFFDirEntry)),
+                           (const char *)buf, swab, ifd_offsets_seen, mp_tagmap);
+        diroff = *(uint32_t *) (ifd+2+ndirs*sizeof(TIFFDirEntry));
+        if (swab)
+            swap_endian (&diroff);
+    }
 
     return true;
 }
