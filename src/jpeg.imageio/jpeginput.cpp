@@ -32,6 +32,7 @@
 #include <cassert>
 #include <cstdio>
 #include <algorithm>
+#include <boost/lexical_cast.hpp>
 
 #include "OpenImageIO/imageio.h"
 #include "OpenImageIO/filesystem.h"
@@ -53,7 +54,7 @@ OIIO_PLUGIN_EXPORTS_BEGIN
         return new JpgInput;
     }
     OIIO_EXPORT const char *jpeg_input_extensions[] = {
-        "jpg", "jpe", "jpeg", "jif", "jfif", "jfi", NULL
+        "jpg", "jpe", "jpeg", "jif", "jfif", "jfi", "mpo", NULL
     };
 
 OIIO_PLUGIN_EXPORTS_END
@@ -116,6 +117,45 @@ comp_info_to_attr (const jpeg_decompress_struct &cinfo)
     else if (std::equal(JPEG_411_COMP, JPEG_411_COMP+size, comp.begin()))
         return JPEG_411_STR;
     return "";
+}
+
+
+
+// Gets the absolute offset of the MP data (in the APP2 marker).
+// Returns -1 if it was not found.
+// This function will restore the stream position.
+static long int
+get_mp_start (FILE *fd) {
+    uint8_t bytes[4];
+    fpos_t old_pos;
+    fgetpos (fd, &old_pos);
+    long int offset = 0, mp_start = -1;
+    int marker, length;
+    do {
+        fseek (fd, offset, SEEK_SET);
+        fread (bytes, sizeof(uint8_t), 2, fd);
+        marker = bytes[1];
+        if (marker == JPEG_MAGIC2 || marker == JPEG_EOI
+            || (marker >= JPEG_RST0 && marker <= JPEG_RST0+7)) {
+            length = 0;
+        }
+        else {
+            fread (bytes, sizeof(uint8_t), 2, fd);
+            length = bytes[0]*256 + bytes[1];
+        }
+
+        if (marker == JPEG_APP0 + 2) {
+            fread (bytes, sizeof(uint8_t), 4, fd);
+            if (!memcmp (bytes, "MPF", 4))
+                mp_start = offset + 2 + 2 + 4;
+        }
+        
+        offset += length + 2;
+    }
+    while (marker != JPEG_APP0+2 && marker != JPEG_EOI && !feof (fd));
+
+    fsetpos (fd, &old_pos);
+    return mp_start;
 }
 
 
@@ -197,6 +237,58 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
         return false;
     }
 
+    if (!start_decompress())
+        return false;
+
+    // Handle subimages for the MPO spec
+    m_subimage = 0;
+    m_subimage_count = m_spec.get_int_attribute ("MP:NumberOfImages", 1);
+    m_subimage_offsets.clear();
+    m_subimage_offsets.push_back(0);
+    // Get the offsets for every image after the first one
+    if (m_subimage_count > 1) {
+        int mp_start = get_mp_start(m_fd);
+        for (int subimage = 1; subimage < m_subimage_count; subimage++) {
+            std::string id = boost::lexical_cast<std::string>(subimage);
+            ParamValue *p = m_spec.find_attribute ("MP:SubimageOffset_"+id, TypeDesc::UINT32);
+            if (p) {
+                unsigned int offset = * (unsigned int *) p->data();
+                m_subimage_offsets.push_back(mp_start + offset);
+            }
+            else {
+                error("MPO missing subimage attributes!");
+                close_file ();
+                return false;
+            }
+        }
+    }
+
+    newspec = m_spec;
+    return true;
+}
+
+
+
+bool
+JpgInput::seek_subimage(int subimage, int miplevel, ImageSpec &newspec) {
+    if (miplevel > 0 || subimage >= m_subimage_count)
+        return false;
+
+    m_subimage = subimage;
+
+    jpeg_destroy_decompress (&m_cinfo);
+    fseek(m_fd, m_subimage_offsets[subimage], SEEK_SET);
+    m_spec = ImageSpec ();
+    if (!start_decompress())
+        return false;
+
+    newspec = m_spec;
+    return true;
+}
+
+
+bool
+JpgInput::start_decompress() {
     // Set up the normal JPEG error routines, then override error_exit and
     // output_message so we intercept all the errors.
     m_cinfo.err = jpeg_std_error ((jpeg_error_mgr *)&m_jerr);
@@ -275,6 +367,12 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
             std::string xml ((const char *)m->data, m->data_length);
             decode_xmp (xml, m_spec);
         }
+        else if (m->marker == (JPEG_APP0+2) &&
+                ! strcmp ((const char *)m->data, "MPF")) {
+            // The block starts with "MPF\0", so skip 4 bytes to get
+            // to the start of the actual MP data TIFF directory
+            decode_mp ((unsigned char *)m->data+4, m->data_length-4, m_spec);
+        }
         else if (m->marker == (JPEG_APP0+13) &&
                 ! strcmp ((const char *)m->data, "Photoshop 3.0"))
             jpeg_decode_iptc ((unsigned char *)m->data);
@@ -310,11 +408,8 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
 
     read_icc_profile(&m_cinfo, m_spec); /// try to read icc profile
 
-    newspec = m_spec;
     return true;
 }
-
-
 
 bool
 JpgInput::read_icc_profile (j_decompress_ptr cinfo, ImageSpec& spec)

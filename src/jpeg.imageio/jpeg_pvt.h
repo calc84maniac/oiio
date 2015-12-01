@@ -82,6 +82,12 @@ class JpgInput : public ImageInput {
     virtual bool open (const std::string &name, ImageSpec &spec);
     virtual bool open (const std::string &name, ImageSpec &spec,
                        const ImageSpec &config);
+    virtual bool seek_subimage(int subimage, int miplevel, ImageSpec &spec);
+    virtual int current_subimage (void) const { return m_subimage; }
+    virtual int current_miplevel (void) const {
+        // No mipmap support
+        return 0;
+    }
     virtual bool read_native_scanline (int y, int z, void *data);
     virtual bool close ();
     const std::string &filename () const { return m_filename; }
@@ -99,6 +105,9 @@ class JpgInput : public ImageInput {
  private:
     FILE *m_fd;
     std::string m_filename;
+    int m_subimage;
+    int m_subimage_count;
+    std::vector<unsigned int> m_subimage_offsets;
     int m_next_scanline;      // Which scanline is the next to read?
     bool m_raw;               // Read raw coefficients, not scanlines
     bool m_cmyk;              // The input file is cmyk
@@ -116,6 +125,8 @@ class JpgInput : public ImageInput {
         m_coeffs = NULL;
         m_jerr.jpginput = this;
     }
+
+    bool start_decompress();
 
     // Rummage through the JPEG "APP1" marker pointed to by buf, decoding
     // IPTC (International Press Telecommunications Council) metadata
