@@ -104,7 +104,7 @@ OIIO_EXPORT ImageInput *png_input_imageio_create () { return new PNGInput; }
 OIIO_EXPORT int png_imageio_version = OIIO_PLUGIN_VERSION;
 
 OIIO_EXPORT const char * png_input_extensions[] = {
-    "png", NULL
+    "png", "pns", NULL
 };
 
 OIIO_PLUGIN_EXPORTS_END

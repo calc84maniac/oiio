@@ -54,7 +54,7 @@ OIIO_PLUGIN_EXPORTS_BEGIN
         return new JpgInput;
     }
     OIIO_EXPORT const char *jpeg_input_extensions[] = {
-        "jpg", "jpe", "jpeg", "jif", "jfif", "jfi", "mpo", NULL
+        "jpg", "jpe", "jpeg", "jif", "jfif", "jfi", "jps", "mpo", NULL
     };
 
 OIIO_PLUGIN_EXPORTS_END
